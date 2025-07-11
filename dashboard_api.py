@@ -1,11 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-import psycopg2
 import os
 from datetime import datetime
 import subprocess
 from apscheduler.schedulers.background import BackgroundScheduler
+import csv
+import glob
 
 app = FastAPI()
 
@@ -18,46 +19,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_db_conn():
-    return psycopg2.connect(dbname='golife_analytics', user=os.getenv('USER'))
+def get_latest_csv_data(directory: str, filename_pattern: str):
+    """Get the latest data from CSV files"""
+    pattern = os.path.join(directory, filename_pattern)
+    files = glob.glob(pattern)
+    if not files:
+        return None
+    
+    # Get the most recent file
+    latest_file = max(files, key=os.path.getctime)
+    
+    try:
+        with open(latest_file, 'r') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            if rows:
+                return rows[0]  # Return the first (and only) row
+    except Exception as e:
+        print(f"Error reading {latest_file}: {e}")
+        return None
+    
+    return None
 
 @app.get("/total_accounts")
 def get_total_accounts():
-    conn = get_db_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT scraped_at, total_accounts FROM total_accounts ORDER BY scraped_at DESC LIMIT 1;")
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if row:
-        return {"scraped_at": row[0], "total_accounts": row[1]}
+    data = get_latest_csv_data("total_accounts", "total_accounts_*.csv")
+    if data:
+        return {
+            "scraped_at": data.get("scraped_at"),
+            "total_accounts": int(data.get("total_accounts", 0))
+        }
     return {"scraped_at": None, "total_accounts": None}
 
 @app.get("/premium_subscribers")
 def get_premium_subscribers(start: Optional[str] = None, end: Optional[str] = None):
-    conn = get_db_conn()
-    cur = conn.cursor()
-    query = "SELECT scraped_at, valid_memberships, active_memberships, trial_memberships, canceled_memberships, past_due_memberships FROM premium_subscribers"
-    params = []
-    if start and end:
-        query += " WHERE scraped_at BETWEEN %s AND %s"
-        params = [start, end]
-    query += " ORDER BY scraped_at DESC"
-    cur.execute(query, params)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [
-        {
-            "scraped_at": r[0],
-            "valid_memberships": r[1],
-            "active_memberships": r[2],
-            "trial_memberships": r[3],
-            "canceled_memberships": r[4],
-            "past_due_memberships": r[5],
-        }
-        for r in rows
-    ]
+    data = get_latest_csv_data("premium_subscribers", "premium_subscribers_*.csv")
+    if data:
+        return [{
+            "scraped_at": data.get("scraped_at"),
+            "valid_memberships": int(data.get("valid_memberships", 0)),
+            "active_memberships": int(data.get("active_memberships", 0)),
+            "trial_memberships": int(data.get("trial_memberships", 0)),
+            "canceled_memberships": int(data.get("canceled_memberships", 0)),
+            "past_due_memberships": int(data.get("past_due_memberships", 0)),
+        }]
+    return []
 
 @app.post("/refresh")
 def refresh_data():
@@ -86,7 +92,7 @@ def start_scheduler():
 start_scheduler()
 
 # Instructions to run:
-# 1. pip install fastapi uvicorn psycopg2-binary
+# 1. pip install fastapi uvicorn
 # 2. python3 -m uvicorn dashboard_api:app --reload
 #
 # The API docs will be available at http://127.0.0.1:8000/docs 
